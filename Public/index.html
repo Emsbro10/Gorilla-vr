@@ -1,1 +1,1181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Gorilla Movement VR with LIV Camera</title>
+<style>
+:root{--bg:#f4f1ea;--fg:#1d1d1b;--accent:#e8590c;--card:#ffffffd9;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#14130f;--fg:#f1eee6;--accent:#ff8a3d;--card:#26231cd9}}
+:root[data-theme="dark"]{color-scheme:dark;--bg:#14130f;--fg:#f1eee6;--accent:#ff8a3d;--card:#26231cd9}
+html,body{height:100%;margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;overflow:hidden}
+canvas{display:block}
+#ui{max-height:92vh;overflow:auto;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);width:min(420px,88vw);background:var(--card);border-radius:16px;padding:22px;text-align:center;backdrop-filter:blur(6px);z-index:10}
+#ui h1{margin:0 0 8px;font-size:1.4rem}
+#ui p{margin:6px 0;font-size:.95rem;line-height:1.4}
+#ui .mb{background:transparent;color:var(--fg);border:2px solid var(--fg);border-radius:8px;padding:6px 10px;font-size:.8rem;font-weight:600;cursor:pointer}
+#swatches{display:flex;flex-wrap:wrap;justify-content:center;gap:8px;margin:8px 0}
+.sw{width:30px;height:30px;border-radius:50%;border:2px solid var(--fg);cursor:pointer;padding:0}
+#pick{width:56px;height:30px;border:0;background:none;cursor:pointer}
+#btn{margin-top:12px;background:var(--accent);color:#fff;border:0;border-radius:10px;padding:12px 22px;font-size:1rem;font-weight:600;cursor:pointer}
+#btn:disabled{opacity:.5;cursor:default}
+</style>
+</head>
+<body>
+<div id="ui">
+  <h1>🦍 Gorilla Movement + LIV Cam</h1>
+  <p>Open this page in the <b>Quest Browser</b> or desktop preview. Push off surfaces with your hands to move. Grab and adjust the <b>LIV Camera Tablet</b>!</p>
+  <p style="margin-top:14px"><b>Your color</b></p>
+  <div id="swatches"></div>
+  <input id="pick" type="color" aria-label="Custom color">
+  <div style="margin:12px 0 0;text-align:left"><b>Map</b> <select id="mapSel" style="font-size:1rem;padding:6px 8px;border-radius:8px;margin-left:6px"></select></div>
+  <details style="margin-top:12px;text-align:left"><summary style="cursor:pointer;font-weight:700">🛠 Map builder</summary>
+    <p style="font-size:.85rem;opacity:.85;margin:8px 0">In VR press <b>B</b> (right) or <b>Y</b> (left) to build. Right trigger places a block, right <b>A</b> deletes the one you point at, left <b>X</b> undoes. Right stick up/down changes size, left/right changes material.</p>
+    <textarea id="mapCode" rows="3" style="width:100%;box-sizing:border-box;font-family:monospace;font-size:.75rem" placeholder="Map code appears here. Paste a map code to load it."></textarea>
+    <div style="margin-top:6px"><button id="mapExport" class="mb">Export</button> <button id="mapImport" class="mb">Load</button> <button id="mapClear" class="mb">Clear my blocks</button></div>
+    <p id="mapStatus" style="font-size:.8rem;opacity:.8;margin:6px 0 0"></p>
+  </details>
+  <button id="micBtn" style="margin:12px 8px 0 0;background:transparent;color:var(--fg);border:2px solid var(--fg);border-radius:10px;padding:10px 16px;font-size:.95rem;font-weight:600;cursor:pointer">🎤 Enable microphone</button>
+  <button id="btn" disabled>Checking VR…</button>
+  <p id="msg" style="opacity:.7;font-size:.85rem"></p>
+</div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+// ---- Renderer setup ----
+const renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local-floor');
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.shadowMap.enabled = false;
+renderer.xr.setFramebufferScaleFactor(0.85);
+try{ renderer.xr.setFoveation(1); }catch(e){}
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.Fog(0xcfe6f5, 30, 110);
+const sky = new THREE.Mesh(new THREE.SphereGeometry(150,24,12), new THREE.ShaderMaterial({
+  side:THREE.BackSide, depthWrite:false, fog:false,
+  uniforms:{top:{value:new THREE.Color(0x3a7bd5)}, bot:{value:new THREE.Color(0xcfe6f5)}},
+  vertexShader:'varying vec3 p;void main(){p=normalize(position);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
+  fragmentShader:'uniform vec3 top;uniform vec3 bot;varying vec3 p;void main(){float t=smoothstep(-0.05,0.55,p.y);gl_FragColor=vec4(mix(bot,top,t),1.);}'
+}));
+scene.add(sky);
+scene.add(new THREE.HemisphereLight(0xbfd9ff, 0x5a4a35, 0.75));
+scene.add(new THREE.AmbientLight(0xffffff, 0.12));
+const sun = new THREE.DirectionalLight(0xfff0d0, 1.1);
+sun.position.set(22,40,14);
+scene.add(sun);
+
+const camera = new THREE.PerspectiveCamera(70, innerWidth/innerHeight, 0.05, 200);
+camera.position.y = 1.6;
+const dolly = new THREE.Group(); dolly.position.set(0,0,4); dolly.add(camera); scene.add(dolly);
+
+// ---- World Boxes ----
+const boxes = [];
+function canvasTex(size, draw){
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  draw(c.getContext('2d'), size);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.encoding = THREE.sRGBEncoding;
+  t.anisotropy = 2; return t;
+}
+const rr = (a,b)=>a+Math.random()*(b-a);
+const TEX = {
+  grass: canvasTex(256,(g,s)=>{
+    g.fillStyle='#4b8a36'; g.fillRect(0,0,s,s);
+    for(let i=0;i<5000;i++){ g.fillStyle='hsl('+rr(88,120)+','+rr(35,55)+'%,'+rr(22,42)+'%)'; g.fillRect(rr(0,s),rr(0,s),rr(1,3),rr(1,4)); }
+  }),
+  brick: canvasTex(256,(g,s)=>{
+    g.fillStyle='#8d8579'; g.fillRect(0,0,s,s);
+    for(let r=0;r<8;r++) for(let c=-1;c<4;c++){
+      const x=c*64+(r%2?32:0), y=r*32;
+      g.fillStyle='hsl('+rr(10,22)+','+rr(30,45)+'%,'+rr(32,44)+'%)'; g.fillRect(x+2,y+2,60,28);
+      for(let i=0;i<30;i++){ g.fillStyle='rgba(0,0,0,'+rr(0.03,0.12)+')'; g.fillRect(x+rr(2,60),y+rr(2,28),rr(1,3),rr(1,3)); }
+    }
+  }),
+  concrete: canvasTex(256,(g,s)=>{
+    g.fillStyle='#e6e6e6'; g.fillRect(0,0,s,s);
+    for(let i=0;i<4000;i++){ const v=Math.floor(rr(190,255)); g.fillStyle='rgba('+v+','+v+','+v+',0.6)'; g.fillRect(rr(0,s),rr(0,s),rr(1,3),rr(1,3)); }
+    g.strokeStyle='rgba(0,0,0,0.25)'; g.lineWidth=4; g.strokeRect(2,2,s-4,s-4);
+  }),
+  wood: canvasTex(256,(g,s)=>{
+    for(let r=0;r<8;r++){
+      g.fillStyle='hsl(32,'+rr(40,55)+'%,'+rr(38,50)+'%)'; g.fillRect(0,r*32,s,32);
+      for(let i=0;i<14;i++){ g.strokeStyle='rgba(60,30,10,'+rr(0.1,0.3)+')'; g.lineWidth=1; const y=r*32+rr(3,29); g.beginPath(); g.moveTo(0,y); g.bezierCurveTo(80,y+rr(-3,3),170,y+rr(-3,3),s,y); g.stroke(); }
+      g.fillStyle='rgba(0,0,0,0.35)'; g.fillRect(0,r*32,s,2);
+    }
+  })
+};
+function scaleUV(geo,w,h,d,tile){
+  const uv = geo.attributes.uv, dims=[[d,h],[d,h],[w,d],[w,d],[w,h],[w,h]];
+  for(let f=0;f<6;f++) for(let v=0;v<4;v++){ const i=f*4+v; uv.setXY(i, uv.getX(i)*dims[f][0]/tile, uv.getY(i)*dims[f][1]/tile); }
+}
+const TILE = {grass:4, brick:3, concrete:2, wood:1.5};
+function addBox(x,y,z,w,h,d,color,kind){
+  kind = kind || 'concrete';
+  const geo = new THREE.BoxGeometry(w,h,d); scaleUV(geo,w,h,d,TILE[kind]);
+  const m = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({color, map:TEX[kind]}));
+  m.position.set(x,y,z); scene.add(m);
+  const aabb = {min:new THREE.Vector3(x-w/2,y-h/2,z-d/2), max:new THREE.Vector3(x+w/2,y+h/2,z+d/2)};
+  boxes.push(aabb);
+  return {mesh:m, aabb};
+}
+// ---- Maps ----
+const baseObjs = [];                                   // the current map's built-in blocks
+const add = (x,y,z,w,h,d,color,kind)=>{ baseObjs.push(addBox(x,y,z,w,h,d,color,kind)); };
+const mkRnd = seed => ()=>{ seed|=0; seed=seed+0x6D2B79F5|0; let t=Math.imul(seed^seed>>>15,1|seed); t=t+Math.imul(t^t>>>7,61|t)^t; return((t^t>>>14)>>>0)/4294967296; };
+const cols = [0xe8590c,0x1c7ed6,0xae3ec9,0xf59f00,0x2f9e44,0xe03131];
+const ground = ()=>add(0,-0.5,0,120,1,120,0xffffff,'grass');
+const walls = (h=30)=>[[0,5,-h,2*h,10,1],[0,5,h,2*h,10,1],[-h,5,0,1,10,2*h],[h,5,0,1,10,2*h]].forEach(a=>add(...a,0xffffff,'brick'));
+const MAPS = {
+  classic: {name:'Classic', spawn:[0,4], build(){
+    ground(); walls();
+    const rnd = mkRnd(1337);
+    for(let i=0;i<14;i++){ const h=1+rnd()*7, w=1+rnd()*3; add((rnd()-.5)*50,h/2,(rnd()-.5)*44-4,w,h,w,cols[i%cols.length],'concrete'); }
+    add(0,3,-12,6,0.6,6,0xffffff,'wood'); add(8,5.5,-18,5,0.6,5,0xffffff,'wood'); add(-8,8,-22,5,0.6,5,0xffffff,'wood');
+  }},
+  blank: {name:'Blank (build your own)', spawn:[0,0], build(){ ground(); walls(); }},
+  towers: {name:'Towers', spawn:[0,24], build(){
+    ground(); walls();
+    const rnd = mkRnd(77);
+    for(let gx=-2;gx<=2;gx++) for(let gz=-2;gz<=2;gz++){
+      const h=3+rnd()*9; add(gx*8,h/2,gz*8-2,1.6,h,1.6,cols[(gx+gz+4)%cols.length],'concrete');
+    }
+    [[-12,7,-2],[12,9,-2],[0,11,-14]].forEach(([x,y,z])=>add(x,y,z,5,0.6,5,0xffffff,'wood'));
+  }},
+  parkour: {name:'Parkour climb', spawn:[0,26], build(){
+    ground(); walls();
+    for(let i=0;i<14;i++){ add(Math.sin(i*1.3)*6, 1.2+i*0.9, 20-i*3.2, 3,0.5,3, 0xffffff,'wood'); }
+    add(0,13.5,-25,8,0.6,6,0xffffff,'brick');
+    add(-10,0.75,22,2,1.5,2,cols[0],'concrete'); add(10,0.75,22,2,1.5,2,cols[1],'concrete');
+  }},
+  islands: {name:'Floating islands', spawn:[0,24], build(){
+    ground(); walls();
+    const rnd = mkRnd(2024);
+    add(0,1.4,18,6,0.6,6,0xffffff,'wood'); add(6,3.2,12,5,0.6,5,0xffffff,'wood'); add(-6,5,6,5,0.6,5,0xffffff,'wood');
+    for(let i=0;i<14;i++){
+      const w=4+rnd()*4, d=4+rnd()*4;
+      add((rnd()-.5)*50, 4+rnd()*12, -22+rnd()*26, w,0.6,d, 0xffffff, i%3===0?'brick':'wood');
+    }
+  }}
+};
+
+// ---- Controller Handles & Setup ----
+const HAND_R = 0.07;
+let myColor;
+try{ const v = parseInt(localStorage.getItem('gcolor')); if(Number.isFinite(v)) myColor = v & 0xffffff; }catch(e){}
+if(myColor === undefined) myColor = new THREE.Color().setHSL(Math.random(),0.7,0.55).getHex();
+const ctrls = [0,1].map(i=>{
+  const c = renderer.xr.getController(i);
+  dolly.add(c); return c;
+});
+
+// ---- Avatars Setup ----
+const UP = new THREE.Vector3(0,1,0);
+const L1 = 0.27, L2 = 0.27;
+const armG1 = new THREE.CylinderGeometry(0.04,0.034,1,10), armG2 = new THREE.CylinderGeometry(0.034,0.028,1,10);
+const ballG = new THREE.SphereGeometry(1,12,10);
+function makeAvatar(color, isLocal){
+  const g = new THREE.Group(), mat = new THREE.MeshLambertMaterial({color});
+  const add = (geo,sc)=>{ const m=new THREE.Mesh(geo,mat); if(sc) m.scale.setScalar(sc); g.add(m); return m; };
+  const head = add(new THREE.SphereGeometry(0.14,20,14));
+  const eyeM = new THREE.MeshBasicMaterial({color:0xffffff}), pupM = new THREE.MeshBasicMaterial({color:0x111111});
+  const eyesGroup = new THREE.Group();
+  [-0.05,0.05].forEach(x=>{
+    const e = new THREE.Mesh(new THREE.SphereGeometry(0.03,8,8), eyeM); e.position.set(x,0.03,-0.115);
+    const p = new THREE.Mesh(new THREE.SphereGeometry(0.015,8,8), pupM); p.position.set(0,0,-0.022);
+    e.add(p); eyesGroup.add(e);
+  });
+  head.add(eyesGroup);
+  head.visible = true; 
+  eyesGroup.visible = !isLocal; 
+  
+  const torso = add(new THREE.CylinderGeometry(0.1,0.075,0.36,14));
+  const a = {g, head, torso, eyesGroup, mat,
+    up:[add(armG1),add(armG1)], fo:[add(armG2),add(armG2)],
+    elbow:[add(ballG,0.036),add(ballG,0.036)], shoulder:[add(ballG,0.05),add(ballG,0.05)],
+    hands:[add(new THREE.SphereGeometry(HAND_R,12,10)),add(new THREE.SphereGeometry(HAND_R,12,10))]};
+  a.hands.forEach(h=>h.visible=true);
+  scene.add(g); return a;
+}
+const me = makeAvatar(myColor, true);
+const remotes = new Map();
+const r3 = v => Math.round(v*1000)/1000;
+
+// ---- Locomotion & Collision Math State ----
+const JUMP_MULT = 0.65, MAX_SPEED = 5, MIN_LAUNCH = 0.8, GRAVITY = -9.81, SAMPLES = 8;
+const AIR_DRAG = 0.03;
+const BODY_FRICTION = 3.0;
+let bodyHit = false;
+let graceT = 0;
+const LAUNCH_GRACE = 0.18;
+const HEAD_R = 0.15, BODY_DROP = 0.28, BODY_R = 0.16;
+let vel = new THREE.Vector3(), samples = [], wasTouching = false, inited = false;
+const tmp = new THREE.Vector3(), wp = new THREE.Vector3();
+const hpW = new THREE.Vector3(), hqW = new THREE.Quaternion(), lpW = new THREE.Vector3(), rpW = new THREE.Vector3();
+const last = [new THREE.Vector3(), new THREE.Vector3()];
+
+function closestOn(b,p,out){ return out.set(
+  Math.max(b.min.x,Math.min(p.x,b.max.x)),
+  Math.max(b.min.y,Math.min(p.y,b.max.y)),
+  Math.max(b.min.z,Math.min(p.z,b.max.z))); }
+
+const cl = new THREE.Vector3();
+function resolveSphere(p,r,collect){
+  const total = new THREE.Vector3(); let hit = false;
+  const q = p.clone();
+  for(const b of boxes){
+    closestOn(b,q,cl);
+    tmp.copy(q).sub(cl); const d = tmp.length();
+    if(d < r){
+      hit = true;
+      let push;
+      if(d > 1e-5) push = tmp.multiplyScalar((r-d)/d);
+      else {
+        const f=[q.x-b.min.x,b.max.x-q.x,q.y-b.min.y,b.max.y-q.y,q.z-b.min.z,b.max.z-q.z];
+        const k=f.indexOf(Math.min(...f)), n=[[-1,0,0],[1,0,0],[0,-1,0],[0,1,0],[0,0,-1],[0,0,1]][k];
+        push = new THREE.Vector3(...n).multiplyScalar(f[k]+r);
+      }
+      q.add(push); total.add(push);
+      if(collect) collect.push(push.clone().normalize());
+    }
+  }
+  return {hit, push: total};
+}
+
+function bodyCollide(){
+  const pts = [[0,0,HEAD_R],[-BODY_DROP,0,BODY_R]];
+  for(const [dy,,r] of pts){
+    camera.getWorldPosition(wp); wp.y += dy;
+    const normals = [];
+    const res = resolveSphere(wp, r, normals);
+    if(res.hit){
+      bodyHit = true;
+      dolly.position.add(res.push);
+      normals.forEach(nm=>{ const vn = vel.dot(nm); if(vn < 0) vel.addScaledVector(nm, -vn); });
+    }
+  }
+}
+
+const tmpS = new THREE.Vector3(), relMove = new THREE.Vector3(), wasTouch = [false,false];
+function step(dt){
+  graceT = Math.max(0, graceT - dt);
+  const move = new THREE.Vector3(), frameVel = new THREE.Vector3();
+  const touch = [false,false], grab = [new THREE.Vector3(), new THREE.Vector3()], hw = [new THREE.Vector3(), new THREE.Vector3()];
+  for(let i=0;i<2;i++){
+    const c = ctrls[i];
+    const delta = c.position.clone().sub(last[i]);
+    last[i].copy(c.position);
+    if(!inited || delta.length() > 0.6) delta.set(0,0,0);
+    c.getWorldPosition(hw[i]);
+    // Swept test along this frame's hand motion: a hand can no longer slip into a surface between frames.
+    const nS = Math.max(1, Math.ceil(delta.length()/0.03));
+    let hitN = null;
+    for(let k=nS; k>=1 && !hitN; k--){
+      tmpS.copy(hw[i]).addScaledVector(delta, -(1-k/nS));
+      const r = resolveSphere(tmpS, HAND_R);
+      if(r.hit) hitN = r.push.lengthSq() > 1e-10 ? r.push.clone().normalize() : UP.clone();
+    }
+    if(hitN){
+      // FIX: a hand that is not already planted only grabs when it moves INTO the surface. This replaces the old
+      // 0.18 s "grace" that switched collisions off for BOTH hands after every launch, so at walking pace the next
+      // hand went straight through the ground. A hand left against a wall after a launch (moving along or away) still can't re-grab.
+      relMove.copy(delta).addScaledVector(vel, dt);          // hand motion relative to the world: arm swing + body flight
+      touch[i] = wasTouch[i] || relMove.dot(hitN) < -0.0005;
+    }
+    wasTouch[i] = touch[i];
+    if(touch[i]) grab[i].copy(delta).negate();      // planted hand: the body moves opposite to the hand
+  }
+  inited = true;
+  const any = touch[0] || touch[1];
+  // FIX: the old code added the grab AND a push-out for the same penetration (and summed both hands),
+  // so the body was shoved up to 2-4x too far: hands bounced off the ground instead of resting on it.
+  if(touch[0] && touch[1]) move.copy(grab[0]).add(grab[1]).multiplyScalar(0.5);   // both planted: average them
+  else if(touch[0]) move.copy(grab[0]);
+  else if(touch[1]) move.copy(grab[1]);
+  frameVel.copy(move).multiplyScalar(1/dt);                                          // launch speed comes from the grab only
+  if(any){
+    for(let pass=0; pass<2; pass++) for(let i=0;i<2;i++){   // anything still inside a surface after the move gets pushed out
+      if(!touch[i]) continue;
+      tmpS.copy(hw[i]).add(move);
+      const r = resolveSphere(tmpS, HAND_R);
+      if(r.hit) move.add(r.push);
+    }
+  }
+
+  if(any){
+    vel.set(0,0,0);
+    samples.push(frameVel); if(samples.length > SAMPLES) samples.shift();
+  } else {
+    if(wasTouching){
+      const avg = new THREE.Vector3();
+      samples.forEach(s=>avg.add(s)); if(samples.length) avg.divideScalar(samples.length);
+      let peak = new THREE.Vector3();
+      samples.forEach(s=>{ if(s.length() > peak.length()) peak = s; });
+      const l = avg.multiplyScalar(0.4).addScaledVector(peak,0.6).multiplyScalar(JUMP_MULT);
+      if(l.length() > MIN_LAUNCH){ vel.copy(l.clampLength(0, MAX_SPEED)); graceT = LAUNCH_GRACE; }
+      else vel.set(0,0,0);
+      samples = [];
+    }
+    vel.y += GRAVITY * dt;
+    vel.multiplyScalar(Math.max(0,1-AIR_DRAG*dt));
+  }
+  wasTouching = any;
+
+  const disp = any ? move : move.add(vel.clone().multiplyScalar(dt));
+  bodyHit = false;
+  const n = Math.max(1, Math.ceil(disp.length()/0.08));
+  const part = disp.clone().divideScalar(n);
+  for(let s=0;s<n;s++){
+    dolly.position.add(part);
+    bodyCollide();
+  }
+  if(bodyHit && !any && graceT <= 0) vel.multiplyScalar(Math.max(0,1-BODY_FRICTION*dt));
+}
+
+const eul = new THREE.Euler(), sv = new THREE.Vector3();
+function seg(m,a,b){
+  sv.copy(b).sub(a); const l = Math.max(sv.length(),1e-4);
+  m.position.copy(a).addScaledVector(sv,0.5); m.scale.set(1,l,1);
+  m.quaternion.setFromUnitVectors(UP, sv.multiplyScalar(1/l));
+}
+const _r=new THREE.Vector3(), _f=new THREE.Vector3(), _s=new THREE.Vector3(), _d=new THREE.Vector3(),
+      _h=new THREE.Vector3(), _p=new THREE.Vector3(), _e=new THREE.Vector3();
+const _hc = new THREE.Vector3(), _hf = new THREE.Vector3();
+const TORSO_DROP = 0.4;   // torso centre hangs this far below your eye level (the original height)
+function poseAvatar(a, hp, hq, lp, rp, dt){        // no per-frame allocations (avoids GC stutter on Quest)
+  const yawHead = eul.setFromQuaternion(hq,'YXZ').y;
+  // The camera sits at the EYES, so the head's centre is a little behind it. That puts head, neck and torso on one line.
+  _hf.set(0,0,-1).applyQuaternion(hq);
+  _hc.copy(hp).addScaledVector(_hf,-0.09);
+  a.head.position.copy(_hc); a.head.quaternion.copy(hq);
+  // Body yaw follows the head with a short lag and never twists more than ~55 degrees away from it.
+  if(a.by === undefined) a.by = yawHead;
+  let dy = Math.atan2(Math.sin(yawHead-a.by), Math.cos(yawHead-a.by));
+  a.by += dy * (1 - Math.exp(-(dt||0.016)*8));
+  dy = Math.atan2(Math.sin(yawHead-a.by), Math.cos(yawHead-a.by));
+  if(Math.abs(dy) > 0.96) a.by = yawHead - Math.sign(dy)*0.96;
+  const yaw = a.by;
+  // The torso hangs from the neck with its top tucked just inside the head (no floating-head gap).
+  a.torso.position.set(_hc.x,hp.y-TORSO_DROP,_hc.z); a.torso.quaternion.setFromAxisAngle(UP,yaw);
+  _r.set(Math.cos(yaw),0,-Math.sin(yaw)); _f.set(-Math.sin(yaw),0,-Math.cos(yaw));
+  for(let i=0;i<2;i++){
+    const hand = i?rp:lp, side = i?1:-1;
+    _s.set(_hc.x,hp.y-0.23,_hc.z).addScaledVector(_r,side*0.17);   // shoulders at their original height
+    _d.copy(hand).sub(_s); let d=_d.length(); _d.multiplyScalar(1/Math.max(d,1e-4));
+    let l1=L1, l2=L2; if(d>l1+l2){ const k=d/(l1+l2); l1*=k; l2*=k; }
+    d = Math.max(d, Math.abs(l1-l2)+1e-3);
+    const aa=(l1*l1-l2*l2+d*d)/(2*d), hh=Math.sqrt(Math.max(0,l1*l1-aa*aa));
+    _h.copy(_r).multiplyScalar(side*0.5); _h.y -= 1; _h.addScaledVector(_f,-0.4);
+    _p.copy(_h).addScaledVector(_d,-_h.dot(_d));
+    if(_p.lengthSq()<1e-6) _p.copy(_r).multiplyScalar(side);
+    _p.normalize();
+    _e.copy(_s).addScaledVector(_d,aa).addScaledVector(_p,hh);
+    { const er = resolveSphere(_e,0.04); if(er.hit) _e.add(er.push); }   // elbows stay out of the ground/blocks
+    a.shoulder[i].position.copy(_s); a.elbow[i].position.copy(_e); a.hands[i].position.copy(hand);
+    seg(a.up[i],_s,_e); seg(a.fo[i],_e,hand);
+  }
+}
+
+// ---- LIV Tablet Camera Prop Setup ----
+const cameraRenderTarget = new THREE.WebGLRenderTarget(512, 320, {
+  minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat
+});
+cameraRenderTarget.texture.encoding = THREE.sRGBEncoding;
+const virtualCamera = new THREE.PerspectiveCamera(70, 512/320, 0.1, 100);
+
+const tabletGroup = new THREE.Group();
+tabletGroup.position.set(0, 1.4, -0.6);
+scene.add(tabletGroup);
+
+const frameMat = new THREE.MeshStandardMaterial({color: 0x2d2a26, roughness: 0.4});
+const handleMat = new THREE.MeshStandardMaterial({color: 0x111111, roughness: 0.3});
+
+const mainBody = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.38, 0.04), frameMat);
+tabletGroup.add(mainBody);
+
+[-0.31, 0.31].forEach(x => {
+  const handle = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.3, 0.05), handleMat);
+  handle.position.set(x, 0, 0);
+  tabletGroup.add(handle);
+});
+
+const feedCanvas = document.createElement('canvas');
+feedCanvas.width = 512; feedCanvas.height = 320;
+const feedCtx = feedCanvas.getContext('2d');
+
+const screenCanvas = document.createElement('canvas');
+screenCanvas.width = 512; screenCanvas.height = 380;
+const screenCtx = screenCanvas.getContext('2d');
+
+const uiTexture = new THREE.CanvasTexture(screenCanvas);
+uiTexture.encoding = THREE.sRGBEncoding;
+
+const screenMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.54, 0.36),
+  new THREE.MeshBasicMaterial({map: uiTexture, transparent: true, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1})
+);
+screenMesh.position.set(0, 0, 0.022);
+tabletGroup.add(screenMesh);
+
+let livState = {
+  mode: 'SELFIE',
+  fov: 70,
+  smoothness: 'LOW',
+  flip: false,
+  mic: true,
+  isRecording: false
+};
+
+let activeGrabber = null;
+const tempVec = new THREE.Vector3();
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+let isMouseDown = false;
+let mouseDragPlane = new THREE.Plane();
+let planeIntersection = new THREE.Vector3();
+
+addEventListener('mousedown', (e) => {
+  if (renderer.xr.isPresenting) return;
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const hits = raycaster.intersectObject(screenMesh);
+  
+  if (hits.length > 0) {
+    const uv = hits[0].uv;
+    handleScreenTouch(uv.x * 512, (1 - uv.y) * 380);
+  } else {
+    const bodyHits = raycaster.intersectObject(mainBody);
+    if (bodyHits.length > 0) {
+      isMouseDown = true;
+      mouseDragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(tempVec).negate(), tabletGroup.position);
+    }
+  }
+});
+
+addEventListener('mousemove', (e) => {
+  if (!isMouseDown || renderer.xr.isPresenting) return;
+  mouse.x = (e.clientX / innerWidth) * 2 - 1;
+  mouse.y = -(e.clientY / innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  if (raycaster.ray.intersectPlane(mouseDragPlane, planeIntersection)) {
+    tabletGroup.position.copy(planeIntersection);
+  }
+});
+
+addEventListener('mouseup', () => { isMouseDown = false; });
+
+function handleScreenTouch(x, y) {
+  if (y >= 4 && y <= 36) {
+    if (x >= 4 && x <= 114) livState.mode = 'SELFIE';
+    else if (x >= 118 && x <= 228) livState.mode = 'FIRST_PERSON';
+    else if (x >= 232 && x <= 342) livState.mode = 'THIRD_PERSON';
+  }
+  if (x >= 350 && x <= 500) {
+    if (y >= 4 && y <= 40) {
+      livState.fov = livState.fov >= 110 ? 50 : livState.fov + 15;
+    } else if (y >= 44 && y <= 74) {
+      livState.flip = !livState.flip;
+    } else if (y >= 84 && y <= 114) {
+      livState.mic = !livState.mic;
+    } else if (y >= 325 && y <= 373) {
+      toggleRecording();
+    }
+  }
+}
+
+let mediaRecorder = null;
+let recordedChunks = [];
+const recordCanvas = document.createElement('canvas');
+recordCanvas.width = 512; recordCanvas.height = 320;
+const recordCtx = recordCanvas.getContext('2d');
+
+async function toggleRecording() {
+  livState.isRecording = !livState.isRecording;
+  if (livState.isRecording) {
+    recordedChunks = [];
+    try {
+      const canvasStream = recordCanvas.captureStream(30);
+      let audioStream = null, adhoc = false;
+      if (livState.mic) {
+        audioStream = (micStream && micStream.active) ? micStream : null;   // use the mic enabled on the menu
+        if (!audioStream && navigator.mediaDevices) {
+          try {
+            audioStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+            adhoc = true;
+          } catch (err) {
+            console.warn("Microphone access denied or unavailable:", err);
+          }
+        }
+      }
+      
+      const tracks = [...canvasStream.getVideoTracks()];
+      if (audioStream) {
+        tracks.push(...audioStream.getAudioTracks());
+      }
+      const combinedStream = new MediaStream(tracks);
+
+      let options = { mimeType: 'video/webm;codecs=vp8,opus' };
+      if (!MediaRecorder.isTypeSupported(options.mimeType)) {
+        options = { mimeType: 'video/webm' };
+      }
+      mediaRecorder = new MediaRecorder(combinedStream, options);
+      mediaRecorder.ondataavailable = e => { if (e.data && e.data.size > 0) recordedChunks.push(e.data); };
+      mediaRecorder.onstop = () => {
+        const blob = new Blob(recordedChunks, {type: 'video/webm'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a'); a.href = url; a.download = 'liv-gorilla-recording.webm'; a.click();
+        if (audioStream && adhoc) {
+          audioStream.getTracks().forEach(t => t.stop());   // keep the menu mic alive for the next recording
+        }
+      };
+      mediaRecorder.start(100);
+    } catch (e) {
+      console.warn("MediaRecorder failed:", e);
+      livState.isRecording = false;
+    }
+  } else {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+  }
+}
+
+const livPixels = new Uint8Array(512 * 320 * 4);   // only used while recording
+const livImg = feedCtx.createImageData(512, 320);
+
+// The live feed is shown straight from the GPU. The old version copied every pixel to the CPU
+// each frame, which stalls the headset's frame pipeline and made movement stutter and feel off.
+const feedTex = cameraRenderTarget.texture;
+feedTex.wrapS = THREE.RepeatWrapping;
+const feedMesh = new THREE.Mesh(
+  new THREE.PlaneGeometry(0.54, 0.36 * 320 / 380),
+  new THREE.MeshBasicMaterial({map: feedTex})
+);
+feedMesh.position.set(0, -0.36 * 10 / 380, 0.0215);   // sits exactly behind the video area of the UI plane
+tabletGroup.add(feedMesh);
+
+function renderLIVFeed() {
+  // While a VR session runs, three.js swaps ANY camera for the headset camera unless XR is off for this pass.
+  const prevTarget = renderer.getRenderTarget(), prevXR = renderer.xr.enabled;
+  const rec = livState.isRecording;
+  try {
+    renderer.xr.enabled = false;
+    renderer.setRenderTarget(cameraRenderTarget);
+    me.eyesGroup.visible = true;
+    if (livState.mode === 'FIRST_PERSON') tabletGroup.visible = false; // don't film the tablet in front of your face
+    renderer.render(scene, virtualCamera);
+    if (rec) renderer.readRenderTargetPixels(cameraRenderTarget, 0, 0, 512, 320, livPixels); // copy ONLY when recording
+  } finally {                          // always hand the headset its framebuffer back
+    me.eyesGroup.visible = false;
+    tabletGroup.visible = true;
+    renderer.setRenderTarget(prevTarget);
+    renderer.xr.enabled = prevXR;
+  }
+
+  feedTex.repeat.x = livState.flip ? -1 : 1;     // flip on the GPU
+  feedTex.offset.x = livState.flip ? 1 : 0;
+
+  if (rec) {
+    const d = livImg.data;
+    for (let y = 0; y < 320; y++) {
+      for (let x = 0; x < 512; x++) {
+        const srcIdx = ((319 - y) * 512 + (livState.flip ? (511 - x) : x)) * 4;
+        const dstIdx = (y * 512 + x) * 4;
+        d[dstIdx] = livPixels[srcIdx]; d[dstIdx + 1] = livPixels[srcIdx + 1]; d[dstIdx + 2] = livPixels[srcIdx + 2]; d[dstIdx + 3] = 255;
+      }
+    }
+    feedCtx.putImageData(livImg, 0, 0);
+    recordCtx.drawImage(feedCanvas, 0, 0);
+  }
+}
+
+// Buttons/tabs are redrawn only when something changes (the video area is transparent).
+function drawLIVUI() {
+  screenCtx.clearRect(0, 0, 512, 380);
+  screenCtx.fillStyle = '#181818';
+  screenCtx.fillRect(0, 0, 512, 40);
+  screenCtx.fillRect(0, 360, 512, 20);
+
+  const drawTab = (x, w, label, active) => {
+    screenCtx.fillStyle = active ? '#e8590c' : '#333333';
+    screenCtx.fillRect(x, 4, w, 32);
+    screenCtx.fillStyle = '#ffffff';
+    screenCtx.font = 'bold 12px system-ui';
+    screenCtx.textAlign = 'center';
+    screenCtx.fillText(label, x + w / 2, 24);
+  };
+  drawTab(4, 110, 'SELFIE', livState.mode === 'SELFIE');
+  drawTab(118, 110, 'FIRST PERSON', livState.mode === 'FIRST_PERSON');
+  drawTab(232, 110, 'THIRD PERSON', livState.mode === 'THIRD_PERSON');
+
+  screenCtx.fillStyle = '#262626';
+  screenCtx.fillRect(350, 4, 158, 36);
+  screenCtx.fillStyle = '#ffffff';
+  screenCtx.font = 'bold 12px system-ui';
+  screenCtx.fillText(`FOV: ${livState.fov}°`, 429, 26);
+
+  screenCtx.fillStyle = livState.flip ? '#e8590c' : '#444444';
+  screenCtx.fillRect(350, 44, 158, 30);
+  screenCtx.fillStyle = '#ffffff';
+  screenCtx.fillText('FLIP FEED', 429, 64);
+
+  screenCtx.fillStyle = livState.mic ? '#2f9e44' : '#444444';
+  screenCtx.fillRect(350, 84, 158, 30);
+  screenCtx.fillStyle = '#ffffff';
+  screenCtx.fillText(livState.mic ? (micStream ? 'MIC: ON' : 'MIC: NO ACCESS') : 'MIC: OFF', 429, 104);
+
+  screenCtx.fillStyle = livState.isRecording ? '#d9381e' : '#e8590c';
+  screenCtx.fillRect(350, 325, 158, 48);
+  screenCtx.fillStyle = '#ffffff';
+  screenCtx.font = 'bold 15px system-ui';
+  screenCtx.fillText(livState.isRecording ? '● RECORDING' : 'RECORD', 429, 355);
+
+  screenCtx.fillStyle = '#888888';
+  screenCtx.font = '10px monospace';
+  screenCtx.fillText('POWERED BY LIV', 170, 372);
+
+  uiTexture.needsUpdate = true;
+}
+
+// ---- Precise Camera Mode Positioning ----
+const targetPos = new THREE.Vector3(), targetLook = new THREE.Vector3(), offset = new THREE.Vector3();
+const tabletWorldPos = new THREE.Vector3(), tabletForward = new THREE.Vector3();
+
+const headQ = new THREE.Quaternion(), fpQuat = new THREE.Quaternion(), _sd = new THREE.Vector3();
+let tpYaw = 0, modePrev = null;
+
+// First point where the segment a->b enters a world box (0..1), or 1 if the way is clear.
+function segHit(a, b) {
+  _sd.copy(b).sub(a);
+  let tmin = 1;
+  for (const bx of boxes) {
+    let t0 = 0, t1 = 1, ok = true;
+    for (let k = 0; k < 3 && ok; k++) {
+      const o  = k===0 ? a.x : k===1 ? a.y : a.z,       d  = k===0 ? _sd.x : k===1 ? _sd.y : _sd.z;
+      const lo = k===0 ? bx.min.x : k===1 ? bx.min.y : bx.min.z, hi = k===0 ? bx.max.x : k===1 ? bx.max.y : bx.max.z;
+      if (Math.abs(d) < 1e-8) { if (o < lo || o > hi) ok = false; }
+      else {
+        let u = (lo - o) / d, v = (hi - o) / d; if (u > v) { const t = u; u = v; v = t; }
+        if (u > t0) t0 = u; if (v < t1) t1 = v; if (t0 > t1) ok = false;
+      }
+    }
+    if (ok && t0 < tmin) tmin = t0;
+  }
+  return tmin;
+}
+
+function updateVirtualCamera(dt) {
+  virtualCamera.fov = livState.fov;
+  virtualCamera.updateProjectionMatrix();
+  if (virtualCamera.parent !== scene) scene.add(virtualCamera);
+
+  const snap = livState.mode !== modePrev;     // jump straight to the new view when switching modes
+  modePrev = livState.mode;
+
+  me.head.getWorldPosition(targetLook);
+
+  if (livState.mode === 'SELFIE') {
+    tabletGroup.getWorldPosition(tabletWorldPos);
+    tabletGroup.getWorldDirection(tabletForward);      // points out of the screen
+    virtualCamera.position.copy(tabletWorldPos).addScaledVector(tabletForward, 0.1);
+    virtualCamera.lookAt(targetLook);
+  } else if (livState.mode === 'FIRST_PERSON') {
+    camera.getWorldPosition(targetPos);
+    camera.getWorldQuaternion(headQ);
+    if (snap) fpQuat.copy(headQ); else fpQuat.slerp(headQ, 1 - Math.exp(-dt * 25)); // light stabilisation
+    virtualCamera.position.copy(targetPos);
+    virtualCamera.quaternion.copy(fpQuat);
+  } else if (livState.mode === 'THIRD_PERSON') {
+    const yawNow = eul.setFromQuaternion(me.head.quaternion, 'YXZ').y;
+    if (snap) tpYaw = yawNow;
+    let dy = yawNow - tpYaw; dy = Math.atan2(Math.sin(dy), Math.cos(dy));
+    tpYaw += dy * (1 - Math.exp(-dt * 2));              // slow follow: head turns no longer whip the camera around
+    offset.set(0, 1.1, 2.6).applyAxisAngle(UP, tpYaw);   // behind and above
+    targetPos.copy(targetLook).add(offset);
+    const t = segHit(targetLook, targetPos);             // pull in if a wall/block is in the way
+    if (t < 1) targetPos.copy(targetLook).addScaledVector(offset, Math.max(0.1, t - 0.08));
+    if (snap) virtualCamera.position.copy(targetPos);
+    else virtualCamera.position.lerp(targetPos, 1 - Math.exp(-dt * 8)); // same smoothness at any frame rate
+    virtualCamera.lookAt(targetLook);
+  }
+}
+
+let prevTriggerState = [false, false];
+function updateVRGrabbing() {
+  if (!renderer.xr.isPresenting) return;
+  
+  const session = renderer.xr.getSession();
+  if (!session) return;
+
+  for (let i = 0; i < 2; i++) {
+    const controller = ctrls[i];
+    const inputSource = session.inputSources[i];
+    if (!inputSource || !inputSource.gamepad) continue;
+    
+    const gamepad = inputSource.gamepad;
+    const gripPressed = gamepad.buttons[1] && gamepad.buttons[1].pressed;
+    const triggerPressed = gamepad.buttons[0] && gamepad.buttons[0].pressed;
+    
+    controller.getWorldPosition(tempVec);
+    const dist = tempVec.distanceTo(tabletGroup.position);
+    
+    if (gripPressed) {
+      if (activeGrabber === null && dist < 0.45) {
+        activeGrabber = i;
+      }
+    } else if (activeGrabber === i) {
+      activeGrabber = null;
+    }
+    
+    if (activeGrabber === i) {
+      controller.getWorldQuaternion(tabletGroup.quaternion);
+      controller.getWorldPosition(tabletGroup.position);
+      tabletGroup.translateZ(-0.18);   // hold it just beyond the hand so the hand doesn't poke through the screen
+      tabletGroup.translateY(0.04);
+    }
+
+    if (triggerPressed && !prevTriggerState[i] && dist < 0.5) {
+      const localTouch = tabletGroup.worldToLocal(tempVec.clone());
+      if (Math.abs(localTouch.z) < 0.12) {
+        const px = (localTouch.x / 0.54 + 0.5) * 512;
+        const py = (0.5 - localTouch.y / 0.36) * 380;
+        handleScreenTouch(px, py);
+      }
+    }
+    prevTriggerState[i] = triggerPressed;
+  }
+}
+
+// ---- UI Swatches & Enter VR Setup ----
+const btn = document.getElementById('btn'), ui = document.getElementById('ui');
+const PALETTE=[0xe8590c,0x1c7ed6,0xae3ec9,0xf59f00,0x2f9e44,0xe03131,0xf06595,0x15aabf,0xffffff,0x212529];
+const pick = document.getElementById('pick');
+const swatchesContainer = document.getElementById('swatches');
+const hex6 = c => '#'+(c&0xffffff).toString(16).padStart(6,'0');
+
+function setColor(c){
+  myColor = c & 0xffffff;
+  me.mat.color.setHex(myColor);
+  pick.value = hex6(myColor);
+  try{ localStorage.setItem('gcolor', String(myColor)); }catch(e){}
+}
+
+swatchesContainer.innerHTML = '';
+PALETTE.forEach(c=>{
+  const b = document.createElement('button'); b.className='sw'; b.style.background = hex6(c);
+  b.setAttribute('aria-label','Color '+hex6(c)); b.onclick = ()=>setColor(c);
+  swatchesContainer.appendChild(b);
+});
+pick.value = hex6(myColor);
+pick.oninput = ()=>setColor(parseInt(pick.value.slice(1),16));
+
+if(navigator.xr && navigator.xr.isSessionSupported){
+  Promise.race([
+    navigator.xr.isSessionSupported('immersive-vr'),
+    new Promise(resolve => setTimeout(() => resolve(false), 2000))
+  ]).then(ok => {
+    btn.disabled = false;
+    btn.textContent = ok ? 'Enter VR' : 'Enter 3D / VR';
+  }).catch(() => {
+    btn.disabled = false;
+    btn.textContent = 'Enter 3D Preview';
+  });
+} else {
+  btn.disabled = false;
+  btn.textContent = 'Enter 3D Preview';
+}
+
+const msgEl = document.getElementById('msg');
+let previewOnly = false;
+btn.onclick = async ()=>{
+  if(previewOnly){ ui.style.display = 'none'; return; }
+  if(!navigator.xr || !navigator.xr.requestSession){
+    msgEl.textContent = 'No WebXR here (' + (isSecureContext ? 'browser has no VR support' : 'page is not on https') + '). Open the https link in the Meta Quest Browser.';
+    previewOnly = true; btn.textContent = 'Preview on screen instead';
+    return;
+  }
+  try{
+    msgEl.textContent = 'Starting VR…';
+    const session = await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor']});
+    session.addEventListener('end',()=>{ ui.style.display='block'; netSend({t:'u', off:1}); setPlayers(); });
+    await renderer.xr.setSession(session);
+    ui.style.display = 'none';
+  }catch(e){
+    msgEl.textContent = 'VR could not start: ' + (e && e.name ? e.name + ' - ' : '') + (e && e.message ? e.message : e);
+    previewOnly = true; btn.textContent = 'Preview on screen instead';
+  }
+};
+
+addEventListener('resize',()=>{
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// Microphone: ask on the menu BEFORE entering VR. Browsers can't show permission prompts inside a headset session.
+let micStream = null;
+const micBtn = document.getElementById('micBtn');
+async function enableMic(){
+  if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    micBtn.textContent = '🎤 No mic support here (needs https)'; return;
+  }
+  try{
+    micStream = await navigator.mediaDevices.getUserMedia({audio:true, video:false});
+    micBtn.textContent = '🎤 Microphone ready';
+    msgEl.textContent = '';
+  }catch(e){
+    micBtn.textContent = '🎤 Mic blocked (' + (e && e.name ? e.name : 'error') + ')';
+    msgEl.textContent = 'The browser refused the mic for this page. If it is embedded, open it as its own page or host the file yourself.';
+  }
+}
+micBtn.onclick = enableMic;
+
+
+// ---- Map builder ----
+const BUILD_MATS = [
+  {kind:'concrete',color:0xe8590c},{kind:'concrete',color:0x1c7ed6},{kind:'concrete',color:0x2f9e44},
+  {kind:'concrete',color:0xae3ec9},{kind:'concrete',color:0xf59f00},{kind:'concrete',color:0xe03131},
+  {kind:'concrete',color:0xffffff},{kind:'wood',color:0xffffff},{kind:'brick',color:0xffffff},{kind:'grass',color:0xffffff}
+];
+const MAT_CSS = ['#e8590c','#1c7ed6','#2f9e44','#ae3ec9','#f59f00','#e03131','#ffffff','#b98b4c','#9a5b45','#4b8a36'];
+const BUILD_SIZES = [[1,1,1],[2,0.5,2],[4,0.5,4],[8,0.5,8],[0.5,3,0.5],[4,3,0.5],[0.5,3,4],[2,2,2]];
+const MAX_BLOCKS = 300, GRID = 0.5, MAP_KEY = 'gorillaMap1';
+const userBlocks = [];                       // {spec:[x,y,z,w,h,d,mat], mesh, aabb}
+let buildOn = false, bMat = 0, bSize = 1, panelSig = '';
+
+function makeBlock(spec, id, owner){
+  const m = BUILD_MATS[spec[6]];
+  const r = addBox(spec[0],spec[1],spec[2],spec[3],spec[4],spec[5],m.color,m.kind);
+  userBlocks.push({spec, mesh:r.mesh, aabb:r.aabb, id, owner});
+}
+function removeBlock(ub){
+  scene.remove(ub.mesh); ub.mesh.geometry.dispose(); ub.mesh.material.dispose();
+  const bi = boxes.indexOf(ub.aabb); if(bi >= 0) boxes.splice(bi,1);
+  const ui = userBlocks.indexOf(ub); if(ui >= 0) userBlocks.splice(ui,1);
+}
+function clearBlocks(){ while(userBlocks.length) removeBlock(userBlocks[userBlocks.length-1]); }
+let currentMap = 'classic';
+function saveMap(){ if(net.open) return;   // online: the server keeps the map
+  try{ localStorage.setItem(MAP_KEY + ':' + currentMap, JSON.stringify(userBlocks.map(b=>b.spec))); }catch(e){} }
+function cleanSpecs(arr){
+  if(!Array.isArray(arr)) throw new Error('not a list');
+  const out = [], cl = v => Math.min(20, Math.max(0.1, v));
+  for(const a of arr){
+    if(!Array.isArray(a) || a.length !== 7 || !a.every(Number.isFinite)) continue;
+    const [x,y,z,w,h,d,mi] = a;
+    if(Math.abs(x) > 100 || Math.abs(z) > 100 || y < -1 || y > 80) continue;
+    out.push([x,y,z,cl(w),cl(h),cl(d),Math.min(BUILD_MATS.length-1, Math.max(0, Math.round(mi)))]);
+    if(out.length >= MAX_BLOCKS) break;
+  }
+  return out;
+}
+
+// switch maps: tear down the old world, build the new one, restore the blocks YOU built on that map
+const mapSel = document.getElementById('mapSel');
+Object.keys(MAPS).forEach(id=>{ const o = document.createElement('option'); o.value = id; o.textContent = MAPS[id].name; mapSel.appendChild(o); });
+function loadMap(id, serverBlocks){
+  if(!MAPS[id]) id = 'classic';
+  clearBlocks();
+  for(const o of baseObjs){
+    scene.remove(o.mesh); o.mesh.geometry.dispose(); o.mesh.material.dispose();
+    const bi = boxes.indexOf(o.aabb); if(bi >= 0) boxes.splice(bi,1);
+  }
+  baseObjs.length = 0;
+  MAPS[id].build(); currentMap = id;
+  try{ localStorage.setItem('gorillaLastMap', id); }catch(e){}
+  if(serverBlocks){ serverBlocks.forEach(b=>{ const c = cleanSpecs([b.s])[0]; if(c) makeBlock(c, b.id, b.o); }); }
+  else try{
+    const raw = localStorage.getItem(MAP_KEY + ':' + id) || (id === 'classic' ? localStorage.getItem(MAP_KEY) : null);
+    if(raw) cleanSpecs(JSON.parse(raw)).forEach(sp=>makeBlock(sp));
+  }catch(e){}
+  const sp = MAPS[id].spawn;
+  dolly.position.set(sp[0], 0, sp[1]); vel.set(0,0,0); wasTouching = false; samples = [];
+  if(activeGrabber === null){ tabletGroup.position.set(sp[0]+0.8, 1.4, sp[1]-1.6); tabletGroup.quaternion.identity(); }
+  mapSel.value = id; panelSig = '';
+}
+mapSel.onchange = ()=>requestMap(mapSel.value);
+
+// menu: export / load / clear
+const mapCode = document.getElementById('mapCode'), mapStatus = document.getElementById('mapStatus');
+document.getElementById('mapExport').onclick = ()=>{
+  const t = JSON.stringify(userBlocks.map(b=>b.spec));
+  mapCode.value = t; mapCode.select();
+  try{ if(navigator.clipboard) navigator.clipboard.writeText(t).catch(()=>{}); }catch(e){}
+  mapStatus.textContent = userBlocks.length + ' blocks exported. Copy the text above to share it.';
+};
+document.getElementById('mapImport').onclick = ()=>{
+  try{
+    const specs = cleanSpecs(JSON.parse(mapCode.value));
+    if(net.open){ netSend({t:'clear'}); netSend({t:'add', specs}); }
+    else { clearBlocks(); specs.forEach(sp=>makeBlock(sp)); saveMap(); }
+    mapStatus.textContent = specs.length + ' blocks loaded.';
+  }catch(e){ mapStatus.textContent = 'That map code is not valid.'; }
+};
+document.getElementById('mapClear').onclick = ()=>{ if(net.open) netSend({t:'clear'}); else { clearBlocks(); saveMap(); } mapStatus.textContent = 'Your blocks were cleared.'; };
+
+// first surface a ray hits (checks every collider): {t, axis, sign, idx} or null
+function rayBoxes(o, d, maxT){
+  let best = null;
+  for(let i=0;i<boxes.length;i++){
+    const bx = boxes[i];
+    let t0 = 0, t1 = maxT, axis = -1, sign = 0, ok = true;
+    for(let k=0;k<3 && ok;k++){
+      const oo = k===0?o.x:k===1?o.y:o.z, dd = k===0?d.x:k===1?d.y:d.z;
+      const lo = k===0?bx.min.x:k===1?bx.min.y:bx.min.z, hi = k===0?bx.max.x:k===1?bx.max.y:bx.max.z;
+      if(Math.abs(dd) < 1e-8){ if(oo < lo || oo > hi) ok = false; }
+      else{
+        let u = (lo-oo)/dd, v = (hi-oo)/dd; if(u > v){ const t=u; u=v; v=t; }
+        if(u > t0){ t0 = u; axis = k; sign = dd > 0 ? -1 : 1; }
+        if(v < t1) t1 = v;
+        if(t0 > t1) ok = false;
+      }
+    }
+    if(ok && axis >= 0 && (!best || t0 < best.t)) best = {t:t0, axis, sign, idx:i};
+  }
+  return best;
+}
+
+// 3D bits: ghost preview, laser pointer, wrist panel
+const ghost = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), new THREE.MeshBasicMaterial({color:0x44ff88, transparent:true, opacity:0.35, depthWrite:false}));
+ghost.add(new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1,1,1)), new THREE.LineBasicMaterial({color:0xffffff})));
+ghost.visible = false; scene.add(ghost);
+const laser = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0,0,-1)]), new THREE.LineBasicMaterial({color:0x44ff88}));
+laser.visible = false;
+const panelCanvas = document.createElement('canvas'); panelCanvas.width = 512; panelCanvas.height = 256;
+const panelCtx = panelCanvas.getContext('2d');
+const panelTex = new THREE.CanvasTexture(panelCanvas); panelTex.encoding = THREE.sRGBEncoding;
+const panel = new THREE.Mesh(new THREE.PlaneGeometry(0.2,0.1), new THREE.MeshBasicMaterial({map:panelTex, transparent:true, side:THREE.DoubleSide}));
+panel.position.set(0,0.08,0.02); panel.rotation.x = -Math.PI/3; panel.visible = false;
+
+function drawPanel(){
+  const g = panelCtx, [w,h,d] = BUILD_SIZES[bSize];
+  g.clearRect(0,0,512,256); g.fillStyle = 'rgba(20,20,20,0.9)'; g.fillRect(0,0,512,256);
+  g.fillStyle = '#44ff88'; g.font = 'bold 32px system-ui'; g.fillText('BUILD MODE', 20, 40);
+  g.fillStyle = '#cccccc'; g.font = '20px system-ui'; g.fillText(MAPS[currentMap].name, 250, 38);
+  g.fillStyle = '#ffffff'; g.font = '25px system-ui';
+  g.fillText('Size  ' + w + ' x ' + h + ' x ' + d, 20, 80);
+  g.fillText('Material', 20, 118);
+  g.fillStyle = MAT_CSS[bMat]; g.fillRect(150, 96, 56, 28);
+  g.fillStyle = '#ffffff'; g.fillText(BUILD_MATS[bMat].kind, 220, 118);
+  g.fillText('Blocks  ' + userBlocks.length + ' / ' + MAX_BLOCKS, 20, 154);
+  g.fillStyle = '#bbbbbb'; g.font = '18px system-ui';
+  g.fillText('R trigger place    R A delete', 20, 186);
+  g.fillText('R stick: size / material', 20, 208);
+  g.fillText('L X undo    B or Y exit build', 20, 230);
+  g.fillText('L stick click: next map', 20, 252);
+  panelTex.needsUpdate = true;
+}
+
+// controllers: remember which is left/right and keep their gamepads
+ctrls.forEach(c=>{
+  c.addEventListener('connected', e=>{ c.userData.hand = e.data && e.data.handedness; c.userData.src = e.data; });
+  c.addEventListener('disconnected', ()=>{ c.userData.src = null; });
+});
+const getCtrl = hand => ctrls.find(c=>c.userData.hand === hand) || (hand === 'right' ? ctrls[1] : ctrls[0]);
+const padOf = hand => { const s = getCtrl(hand).userData.src; return s && s.gamepad ? s.gamepad : null; };
+const bprev = {};
+function edge(hand, idx){
+  const g = padOf(hand), now = !!(g && g.buttons[idx] && g.buttons[idx].pressed), key = hand + idx, was = bprev[key];
+  bprev[key] = now; return now && !was;
+}
+const stickArm = {x:true, y:true};
+const _bo = new THREE.Vector3(), _bd = new THREE.Vector3(), _bq = new THREE.Quaternion(), _bp = new THREE.Vector3(), _bh = new THREE.Vector3();
+let builderBroken = false;
+
+function updateBuilder(){
+  if(!renderer.xr.isPresenting){ buildOn = false; ghost.visible = laser.visible = panel.visible = false; return; }
+  const toggle = edge('right',5) | edge('left',5), place = edge('right',0), del = edge('right',4), undo = edge('left',4), nextMap = edge('left',3);
+  if(toggle) buildOn = !buildOn;
+  ghost.visible = laser.visible = panel.visible = buildOn;
+  if(!buildOn) return;
+  if(nextMap){ const ids = Object.keys(MAPS); requestMap(ids[(ids.indexOf(currentMap)+1) % ids.length]); }
+
+  const R = getCtrl('right'), L = getCtrl('left');
+  if(panel.parent !== L) L.add(panel);
+  if(laser.parent !== R) R.add(laser);
+
+  // right stick: up/down = size, left/right = material
+  const g = padOf('right');
+  if(g && g.axes){
+    const n = g.axes.length, sx = n >= 4 ? g.axes[2] : (g.axes[0]||0), sy = n >= 4 ? g.axes[3] : (g.axes[1]||0);
+    if(Math.abs(sy) > 0.7 && stickArm.y){ bSize = (bSize + (sy < 0 ? 1 : -1) + BUILD_SIZES.length) % BUILD_SIZES.length; stickArm.y = false; }
+    if(Math.abs(sy) < 0.3) stickArm.y = true;
+    if(Math.abs(sx) > 0.7 && stickArm.x){ bMat = (bMat + (sx > 0 ? 1 : -1) + BUILD_MATS.length) % BUILD_MATS.length; stickArm.x = false; }
+    if(Math.abs(sx) < 0.3) stickArm.x = true;
+  }
+
+  // aim: ray from the right controller; the block sits flush against whatever it hits
+  R.getWorldPosition(_bo); R.getWorldQuaternion(_bq); _bd.set(0,0,-1).applyQuaternion(_bq);
+  const hit = rayBoxes(_bo, _bd, 30), len = hit ? hit.t : 5;
+  laser.scale.set(1,1,len);
+  const [w,h,d] = BUILD_SIZES[bSize], half = [w/2,h/2,d/2];
+  _bp.copy(_bo).addScaledVector(_bd, len);
+  const c = [_bp.x,_bp.y,_bp.z];
+  for(let k=0;k<3;k++){
+    if(hit && k === hit.axis) c[k] += hit.sign*half[k];
+    else c[k] = Math.round((c[k]-half[k])/GRID)*GRID + half[k];
+  }
+  c[0] = Math.max(-58, Math.min(58, c[0])); c[2] = Math.max(-58, Math.min(58, c[2]));
+  c[1] = Math.max(half[1], c[1]);
+  ghost.scale.set(w,h,d); ghost.position.set(c[0],c[1],c[2]);
+
+  // don't build on top of your own head
+  camera.getWorldPosition(_bh);
+  const dx = Math.max(c[0]-half[0]-_bh.x, 0, _bh.x-(c[0]+half[0])), dy = Math.max(c[1]-half[1]-_bh.y, 0, _bh.y-(c[1]+half[1])), dz = Math.max(c[2]-half[2]-_bh.z, 0, _bh.z-(c[2]+half[2]));
+  const blocked = Math.hypot(dx,dy,dz) < 0.45 || userBlocks.length >= MAX_BLOCKS;
+  ghost.material.color.setHex(blocked ? 0xff4444 : 0x44ff88);
+
+  const buzz = () => { try{ const a = g && g.hapticActuators && g.hapticActuators[0]; if(a && a.pulse) a.pulse(0.4,40); }catch(e){} };
+  const tabletNear = _bo.distanceTo(tabletGroup.position) < 0.6;    // trigger near the tablet presses the tablet instead
+  if(place && !blocked && !tabletNear){
+    const r2 = v => Math.round(v*100)/100;
+    const spec = [r2(c[0]),r2(c[1]),r2(c[2]),w,h,d,bMat];
+    if(net.open) netSend({t:'add', specs:[spec]}); else { makeBlock(spec); saveMap(); }
+    buzz();
+  }
+  if(del && hit){
+    const ub = userBlocks.find(u => u.aabb === boxes[hit.idx]);
+    if(ub){
+      if(net.open){ if(ub.owner === myId){ netSend({t:'del', ids:[ub.id]}); buzz(); } }   // online you can delete your own blocks
+      else { removeBlock(ub); saveMap(); buzz(); }
+    }
+  }
+  if(undo){
+    if(net.open){ const uid = myStack.pop(); if(uid !== undefined){ netSend({t:'del', ids:[uid]}); buzz(); } }
+    else if(userBlocks.length){ removeBlock(userBlocks[userBlocks.length-1]); saveMap(); buzz(); }
+  }
+
+  const sig = currentMap + ':' + bSize + ':' + bMat + ':' + userBlocks.length;
+  if(sig !== panelSig){ panelSig = sig; drawPanel(); }
+}
+
+// ---- Multiplayer: WebSocket to the host server (no accounts needed) ----
+const net = {ws:null, open:false};
+let myId = null, sendT = 0;
+const myStack = [];                                    // ids of blocks I placed (for undo)
+function netSend(o){ if(net.open && net.ws) net.ws.send(JSON.stringify(o)); }
+function requestMap(id){ if(net.open) netSend({t:'map', id}); else loadMap(id); }
+function setPlayers(){
+  if(ui.style.display === 'none') return;
+  msgEl.textContent = net.open ? ('Online: ' + (remotes.size+1) + (remotes.size ? ' players' : ' player (you)')) : 'Offline: playing solo (no server found).';
+}
+function makeRemote(col){
+  const a = makeAvatar(col,false); a.c = col; a.init = false;
+  a.th=new THREE.Vector3(); a.tq=new THREE.Quaternion(); a.tl=new THREE.Vector3(); a.tr=new THREE.Vector3();
+  a.ch=new THREE.Vector3(); a.cq=new THREE.Quaternion(); a.cl=new THREE.Vector3(); a.cr=new THREE.Vector3();
+  return a;
+}
+function clearRemotes(){ for(const a of remotes.values()) scene.remove(a.g); remotes.clear(); }
+function connect(){
+  if(location.protocol === 'file:') return;
+  let ws; try{ ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host); }catch(e){ return; }
+  net.ws = ws;
+  ws.onopen = ()=>{ net.open = true; setPlayers(); };
+  ws.onclose = ()=>{
+    const was = net.open; net.open = false; net.ws = null; myId = null; clearRemotes();
+    if(was) loadMap(currentMap);                       // back to your own saved blocks
+    setPlayers(); setTimeout(connect, 2000);
+  };
+  ws.onerror = ()=>{};
+  ws.onmessage = ev=>{
+    let m; try{ m = JSON.parse(ev.data); }catch(e){ return; }
+    if(!m) return;
+    if(m.t === 'hi'){ myId = m.id; }
+    else if(m.t === 'w' && Array.isArray(m.blocks)){ myStack.length = 0; loadMap(m.map, m.blocks); }   // the shared world
+    else if(m.t === 'add' && Array.isArray(m.list)){
+      for(const b of m.list){ const c = cleanSpecs([b.s])[0]; if(!c) continue; makeBlock(c, b.id, b.o); if(b.o === myId) myStack.push(b.id); }
+      panelSig = '';
+    }
+    else if(m.t === 'del' && Array.isArray(m.ids)){
+      for(const id of m.ids){ const ub = userBlocks.find(u=>u.id === id); if(ub) removeBlock(ub); }
+      panelSig = '';
+    }
+    else if(m.t === 's' && Array.isArray(m.p)){
+      const seen = new Set();
+      for(const q of m.p){                             // [id, color, head x y z qx qy qz qw, left xyz, right xyz]
+        if(!Array.isArray(q) || q.length !== 15 || !q.every(Number.isFinite)) continue;
+        const id = q[0], col = q[1] & 0xffffff; seen.add(id);
+        let a = remotes.get(id);
+        if(!a){ a = makeRemote(col); remotes.set(id,a); }
+        a.th.set(q[2],q[3],q[4]); a.tq.set(q[5],q[6],q[7],q[8]).normalize();
+        a.tl.set(q[9],q[10],q[11]); a.tr.set(q[12],q[13],q[14]);
+        if(!a.init){ a.ch.copy(a.th); a.cq.copy(a.tq); a.cl.copy(a.tl); a.cr.copy(a.tr); a.init = true; }
+        if(a.c !== col){ a.c = col; a.mat.color.setHex(col); }
+      }
+      for(const [id,a] of remotes) if(!seen.has(id)){ scene.remove(a.g); remotes.delete(id); }
+      setPlayers();
+    }
+  };
+}
+
+let lastMapId = 'classic'; try{ lastMapId = localStorage.getItem('gorillaLastMap') || 'classic'; }catch(e){}
+loadMap(lastMapId);
+connect();
+
+let livFrame = 0, livBroken = false, uiSig = '';
+function resolveHand(p){ for(let k=0;k<2;k++){ const r = resolveSphere(p,HAND_R); if(!r.hit) break; p.add(r.push); } }
+// Main Animation Loop
+let prev = performance.now();
+renderer.setAnimationLoop(()=>{
+  const now = performance.now();
+  const dt = Math.min((now-prev)/1000, 0.05); prev = now;
+  const inVR = renderer.xr.isPresenting;
+
+  if(inVR && dt > 0) step(dt);
+
+  if(inVR){
+    camera.getWorldPosition(hpW); camera.getWorldQuaternion(hqW);
+    ctrls[0].getWorldPosition(lpW); ctrls[1].getWorldPosition(rpW);
+    resolveHand(lpW); resolveHand(rpW);      // hands rest ON surfaces instead of clipping through
+    poseAvatar(me, hpW, hqW, lpW, rpW, dt);
+    me.g.visible = true;
+    sendT += dt;
+    if(net.open && sendT > 0.05){
+      sendT = 0;
+      netSend({t:'u', c:myColor,
+        h:[r3(hpW.x),r3(hpW.y),r3(hpW.z),r3(hqW.x),r3(hqW.y),r3(hqW.z),r3(hqW.w)],
+        l:[r3(lpW.x),r3(lpW.y),r3(lpW.z)], r:[r3(rpW.x),r3(rpW.y),r3(rpW.z)]});
+    }
+  } else {
+    me.g.visible = true;
+    // FIX: camera.position is relative to the dolly, so the preview avatar was drawn 4 m away from the player.
+    camera.getWorldPosition(hpW); camera.getWorldQuaternion(hqW);
+    lpW.set(-0.2, -0.4, -0.4).applyQuaternion(hqW).add(hpW);
+    rpW.set( 0.2, -0.4, -0.4).applyQuaternion(hqW).add(hpW);
+    poseAvatar(me, hpW, hqW, lpW, rpW, dt);
+  }
+
+  const kk = 1 - Math.exp(-dt*18);      // smooth other players between network updates
+  for(const a of remotes.values()){
+    a.ch.lerp(a.th,kk); a.cq.slerp(a.tq,kk); a.cl.lerp(a.tl,kk); a.cr.lerp(a.tr,kk);
+    poseAvatar(a, a.ch, a.cq, a.cl, a.cr, dt);
+  }
+
+  if (!builderBroken) {
+    try { updateBuilder(); }
+    catch (err) { builderBroken = true; ghost.visible = laser.visible = panel.visible = false; console.error('Map builder disabled:', err); }
+  }
+
+  if (!livBroken) {
+    try {
+      updateVRGrabbing();             // move the tablet first, THEN aim the camera at it
+      updateVirtualCamera(dt);
+      if ((livFrame++ % 3) === 0) renderLIVFeed();     // feed at a third of the frame rate: light on Quest
+      const sig = livState.mode + livState.fov + livState.flip + livState.mic + livState.isRecording + !!micStream;
+      if (sig !== uiSig) { uiSig = sig; drawLIVUI(); }
+    } catch (err) {
+      livBroken = true;               // never let the camera feed stop the headset view
+      console.error('LIV camera disabled:', err);
+    }
+  }
+
+  renderer.render(scene, camera);
+});
+})();
+</script>
+</body>
+</html>
